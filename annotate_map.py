@@ -63,6 +63,13 @@ for m in re.finditer(r'id="map-region-(\d+)"', svg):
 
 W, H = 945.0, 2232.0
 
+# Manual center overrides for regions whose SVG has no map-wall-center path.
+# Coordinates are computed from the path vertices (centroid of the polygon).
+MANUAL_CENTERS = {
+    "26": (882.0, 1211.0),   # Area 19 — outer right edge, no wall-center in SVG
+}
+svg_centers.update({k: v for k, v in MANUAL_CENTERS.items() if k not in svg_centers})
+
 # ---------------------------------------------------------------------------
 # Query DB: ticks, current boulders, new boulders
 # ---------------------------------------------------------------------------
