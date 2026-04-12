@@ -331,6 +331,54 @@ def sync_sessions(conn, token, user_id):
 
 
 # ---------------------------------------------------------------------------
+# Fetch & sync all current climbs for each gym (not just user-ticked ones)
+# ---------------------------------------------------------------------------
+GYM_CLIMBS_QUERY = """
+query gymClimbs($gymId: ID!) {
+  climbs(gymId: $gymId, climbType: boulder) {
+    data {
+      id name grade climbType
+      holdColor { nameLoc color }
+      wall { nameLoc }
+      inAt outAt outPlannedAt
+    }
+  }
+}
+"""
+
+def sync_gym_climbs(conn, token, gyms):
+    log.info("Syncing all gym climbs...")
+    total = 0
+    for gym in gyms:
+        gym_id = gym["id"]
+        data = gql(GYM_CLIMBS_QUERY, {"gymId": gym_id}, token=token)
+        climbs = data["climbs"]["data"]
+        for climb in climbs:
+            conn.execute("""
+                INSERT INTO climbs(id, gym_id, name, grade, grade_font, climb_type,
+                                   hold_color, hold_color_hex, wall, in_at, out_at, out_planned_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, grade=excluded.grade, grade_font=excluded.grade_font,
+                    hold_color=excluded.hold_color, hold_color_hex=excluded.hold_color_hex,
+                    wall=excluded.wall, out_at=excluded.out_at, out_planned_at=excluded.out_planned_at
+            """, (
+                climb["id"], gym_id,
+                climb.get("name"),
+                climb.get("grade"), to_font(climb.get("grade")),
+                climb.get("climbType"),
+                climb.get("holdColor", {}).get("nameLoc") if climb.get("holdColor") else None,
+                climb.get("holdColor", {}).get("color") if climb.get("holdColor") else None,
+                climb.get("wall", {}).get("nameLoc") if climb.get("wall") else None,
+                climb.get("inAt"), climb.get("outAt"), climb.get("outPlannedAt"),
+            ))
+        total += len(climbs)
+        log.info(f"  {gym['name']}: {len(climbs)} boulders")
+    conn.commit()
+    log.info(f"  {total} gym climbs synced total")
+
+
+# ---------------------------------------------------------------------------
 # Fetch & sync ticks (climbUsers per session via climbUserDays)
 # ---------------------------------------------------------------------------
 TICKS_QUERY = """
@@ -463,7 +511,8 @@ def main():
         conn.row_factory = sqlite3.Row
         init_db(conn)
 
-        sync_gyms(conn, token)
+        gyms = sync_gyms(conn, token)
+        sync_gym_climbs(conn, token, gyms)
         sync_sessions(conn, token, user_id)
         sync_ticks(conn, token, user_id)
 
