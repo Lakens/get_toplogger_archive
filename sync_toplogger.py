@@ -88,19 +88,19 @@ DB_PATH    = "P:/Backups/Toplogger/toplogger.db"
 TOKENS_FILE = os.path.join(os.path.dirname(__file__), "tokens.json")
 
 # ---------------------------------------------------------------------------
-# Grade conversion (Toplogger internal → Font scale for boulders)
+# Grade conversion: Toplogger stores grades as round(decimal * 100)
+# where decimal steps in 1/6 increments: 6.0=6a, 6.17=6a+, 6.33=6b, etc.
 # ---------------------------------------------------------------------------
-FONT_GRADES = {
-    100: "1",   150: "1+",
-    200: "2",   250: "2+",
-    300: "3",   350: "3+",
-    400: "4",   450: "4+",
-    500: "5a",  525: "5a+", 550: "5b",  575: "5b+", 590: "5c",  596: "5c+",
-    600: "6a",  608: "6a+", 616: "6b",  624: "6b+", 632: "6c",  640: "6c+",
-    648: "7a",  656: "7a+", 664: "7b",  672: "7b+", 680: "7c",  688: "7c+",
-    696: "8a",  704: "8a+", 712: "8b",  720: "8b+", 728: "8c",  736: "8c+",
-    744: "9a",
-}
+_GRADE_STEPS = [
+    (3.00,"3"),  (3.17,"3+"), (3.33,"3b"),(3.50,"3b+"),(3.67,"3c"),(3.83,"3c+"),
+    (4.00,"4"),  (4.17,"4+"), (4.33,"4b"),(4.50,"4b+"),(4.67,"4c"),(4.83,"4c+"),
+    (5.00,"5a"), (5.17,"5a+"),(5.33,"5b"),(5.50,"5b+"),(5.67,"5c"),(5.83,"5c+"),
+    (6.00,"6a"), (6.17,"6a+"),(6.33,"6b"),(6.50,"6b+"),(6.67,"6c"),(6.83,"6c+"),
+    (7.00,"7a"), (7.17,"7a+"),(7.33,"7b"),(7.50,"7b+"),(7.67,"7c"),(7.83,"7c+"),
+    (8.00,"8a"), (8.17,"8a+"),(8.33,"8b"),(8.50,"8b+"),(8.67,"8c"),(8.83,"8c+"),
+    (9.00,"9a"),
+]
+FONT_GRADES = {round(d * 100): label for d, label in _GRADE_STEPS}
 
 def to_font(grade):
     if not grade:
@@ -108,7 +108,6 @@ def to_font(grade):
     grade = int(grade)
     if grade == 0:
         return "ungraded"
-    # Find nearest grade
     closest = min(FONT_GRADES.keys(), key=lambda k: abs(k - grade))
     return FONT_GRADES[closest]
 
