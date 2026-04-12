@@ -1,0 +1,7 @@
+tokens.json
+*.json
+__pycache__/
+*.pyc
+*.db
+sync_log.txt
+AUTH_NEEDED.md
