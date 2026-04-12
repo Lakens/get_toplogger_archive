@@ -22,6 +22,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 import requests
 
@@ -229,6 +230,22 @@ def init_db(conn):
         CREATE INDEX IF NOT EXISTS idx_ticks_date     ON ticks(ticked_first_at_date);
     """)
     conn.commit()
+
+    # Migrations: add columns that may not exist in older databases
+    new_cols = [
+        ("climbs", "grade_admin",         "INTEGER"),
+        ("climbs", "grade_community",      "INTEGER"),
+        ("climbs", "grade_community_font", "TEXT"),
+        ("climbs", "rating_avg",           "REAL"),
+        ("climbs", "grade_vote_stats",     "TEXT"),
+        ("climbs", "rating_vote_stats",    "TEXT"),
+    ]
+    for table, col, col_type in new_cols:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +496,103 @@ def sync_ticks(conn, token, user_id):
 
 
 # ---------------------------------------------------------------------------
+# Fetch grade votes + rating votes for boulders the user has climbed
+# ---------------------------------------------------------------------------
+CLIMB_STATS_BATCH = 3    # aliases per GraphQL request (keep below rate limit)
+CLIMB_STATS_DELAY = 2.0  # seconds between batches
+
+def sync_climb_stats(conn, token):
+    log.info("Syncing grade/rating vote stats for ticked climbs...")
+
+    # Only fetch climbs that don't have stats yet — keeps weekly runs fast
+    rows = conn.execute("""
+        SELECT DISTINCT c.gym_id, c.id
+        FROM ticks t
+        JOIN climbs c ON t.climb_id = c.id
+        WHERE c.gym_id IS NOT NULL
+          AND c.grade_vote_stats IS NULL
+    """).fetchall()
+
+    log.info(f"  {len(rows)} ticked climbs need stats")
+
+    if not rows:
+        log.info("  No ticked climbs found")
+        return
+
+    # Pause to let prior sync requests clear the server rate-limit window
+    time.sleep(10)
+
+    def weighted_avg(items, val_key, count_key):
+        total_w = sum(i[count_key] for i in items)
+        if not total_w:
+            return None
+        return sum(i[val_key] * i[count_key] for i in items) / total_w
+
+    updated = 0
+    for batch_start in range(0, len(rows), CLIMB_STATS_BATCH):
+        batch = rows[batch_start:batch_start + CLIMB_STATS_BATCH]
+
+        # Build a multi-alias query: c0: climb(...) { ... }, c1: climb(...) { ... }, ...
+        aliases = []
+        for i, (gym_id, climb_id) in enumerate(batch):
+            aliases.append(f"""
+  c{i}: climb(gymId: "{gym_id}", id: "{climb_id}") {{
+    id gradeAdmin
+    gradeVoteStats {{ grade count }}
+    ratingVoteStats {{ stars count }}
+  }}""")
+        query = "query {" + "".join(aliases) + "\n}"
+
+        # Retry with backoff on throttle
+        for attempt in range(4):
+            try:
+                data = gql(query, token=token)
+                break
+            except Exception as e:
+                if "ThrottlerException" in str(e) and attempt < 3:
+                    wait = 5 * (attempt + 1)
+                    log.info(f"  Rate limited, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+
+        time.sleep(CLIMB_STATS_DELAY)
+
+        for key, climb in data.items():
+            if not climb:
+                continue
+            grade_votes = climb.get("gradeVoteStats") or []
+            rating_votes = climb.get("ratingVoteStats") or []
+
+            grade_community_raw = weighted_avg(grade_votes, "grade", "count")
+            grade_community = round(grade_community_raw) if grade_community_raw else None
+            rating = weighted_avg(rating_votes, "stars", "count")
+
+            conn.execute("""
+                UPDATE climbs SET
+                    grade_admin         = ?,
+                    grade_community     = ?,
+                    grade_community_font = ?,
+                    rating_avg          = ?,
+                    grade_vote_stats    = ?,
+                    rating_vote_stats   = ?
+                WHERE id = ?
+            """, (
+                climb.get("gradeAdmin"),
+                grade_community,
+                to_font(grade_community),
+                round(rating, 2) if rating else None,
+                json.dumps(grade_votes),
+                json.dumps(rating_votes),
+                climb["id"],
+            ))
+            updated += 1
+
+    conn.commit()
+    log.info(f"  {updated} climb stats updated")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -515,6 +629,7 @@ def main():
         sync_gym_climbs(conn, token, gyms)
         sync_sessions(conn, token, user_id)
         sync_ticks(conn, token, user_id)
+        sync_climb_stats(conn, token)
 
         for table in ["gyms", "sessions", "climbs", "ticks"]:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
