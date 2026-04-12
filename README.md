@@ -72,9 +72,17 @@ The refresh token expires roughly every two weeks. When it does:
 ### What it produces
 
 - Each wall region is filled with a white-to-orange heat colour (more ticks = deeper orange)
-- Area numbers and tick counts are overlaid at the correct label positions
-- A legend is added in the top-left corner
+- Area numbers and tick counts are overlaid at the correct positions
+- One coloured dot per currently active boulder, using the gym's hold colour — so you can see at a glance how many routes are in each area and what colour they are
+- A red NEW badge with grade labels for boulders set in the last 7 days
+- A legend in the top-left corner
 - Output is saved to `P:/Backups/Toplogger/monk_rotterdam_annotated.svg` and opened automatically
+
+### How label positions work
+
+The TopLogger API provides `labelX`/`labelY` fractions (0–1) for each wall, but these are calibrated for the web app's display container, not the raw SVG coordinate space — they produce incorrect positions when multiplied by the SVG width and height directly.
+
+Instead, the script reads the `map-wall-center` paths that are already embedded in the floorplan SVG. Each wall region contains a tiny invisible triangle at its visual center; the script extracts the first coordinate of each triangle and uses that as the label anchor. This gives pixel-perfect placement with no manual tuning.
 
 ### How to get the data it needs
 

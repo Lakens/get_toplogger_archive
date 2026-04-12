@@ -1,55 +1,94 @@
 """
 Annotates the Monk Rotterdam floorplan SVG with:
-  - Area labels at the correct positions
+  - Area labels at the correct positions (using SVG wall-center coords)
   - Regions coloured by number of ticks (from the SQLite DB)
+  - Coloured dots for every currently active boulder (hold colour)
+  - Red NEW badge on areas with boulders set in the last NEW_DAYS days
 Saves to P:/Backups/Toplogger/monk_rotterdam_annotated.svg
 """
 
-import json, re, sqlite3
-import requests
+import re, sqlite3
 
 SVG_IN  = "P:/Backups/Toplogger/monk_rotterdam_floorplan.svg"
 SVG_OUT = "P:/Backups/Toplogger/monk_rotterdam_annotated.svg"
 
-# Wall data with label positions (labelX/Y are 0-1 fractions of SVG viewport)
+# Wall data: region ID maps to area name.
+# Label positions come from the SVG's map-wall-center paths (extracted once;
+# see the "How it works" section in README for details).
 walls = [
-    {"name":"Area 1",  "region":"1",  "lx":0.085685,"ly":0.855546},
-    {"name":"Area 2",  "region":"2",  "lx":0.079611,"ly":0.804721},
-    {"name":"Area 3",  "region":"3",  "lx":0.11815, "ly":0.727829},
-    {"name":"Area 4",  "region":"4",  "lx":0.13949, "ly":0.658361},
-    {"name":"Area 5",  "region":"5",  "lx":0.126273,"ly":0.625583},
-    {"name":"Area 6",  "region":"6",  "lx":0.187568,"ly":0.451226},
-    {"name":"Area 7",  "region":"7",  "lx":0.168086,"ly":0.411411},
-    {"name":"Area 8",  "region":"8",  "lx":0.22814, "ly":0.378246},
-    {"name":"Area 9",  "region":"9",  "lx":0.247369,"ly":0.423981},
-    {"name":"Area 10", "region":"10", "lx":0.201103,"ly":0.208815},
-    {"name":"Area 11", "region":"11", "lx":0.252241,"ly":0.190407},
-    {"name":"Area 12", "region":"12", "lx":0.286786,"ly":0.212711},
-    {"name":"Area 13", "region":"13", "lx":0.423033,"ly":0.186577},
-    {"name":"Area 14", "region":"14", "lx":0.551833,"ly":0.181914},
-    {"name":"Area 15", "region":"15", "lx":0.652537,"ly":0.219208},
-    {"name":"Area 16", "region":"16", "lx":0.671227,"ly":0.315044},
-    {"name":"Area 17", "region":"17", "lx":0.634686,"ly":0.39881},
-    {"name":"Area 18", "region":"18", "lx":0.656465,"ly":0.437775},
-    {"name":"Area 19", "region":"26", "lx":0.735249,"ly":0.539435},
-    {"name":"Area 20", "region":"19", "lx":0.660802,"ly":0.617874},
-    {"name":"Area 21", "region":"20", "lx":0.560159,"ly":0.647788},
-    {"name":"Area 22", "region":"21", "lx":0.544035,"ly":0.725261},
-    {"name":"Area 23", "region":"22", "lx":0.579433,"ly":0.812704},
-    {"name":"Area 24", "region":"23", "lx":0.633761,"ly":0.891951},
-    {"name":"Kilter",  "region":"25", "lx":0.234838,"ly":0.009239},
+    {"name":"Area 1",  "region":"1"},
+    {"name":"Area 2",  "region":"2"},
+    {"name":"Area 3",  "region":"3"},
+    {"name":"Area 4",  "region":"4"},
+    {"name":"Area 5",  "region":"5"},
+    {"name":"Area 6",  "region":"6"},
+    {"name":"Area 7",  "region":"7"},
+    {"name":"Area 8",  "region":"8"},
+    {"name":"Area 9",  "region":"9"},
+    {"name":"Area 10", "region":"10"},
+    {"name":"Area 11", "region":"11"},
+    {"name":"Area 12", "region":"12"},
+    {"name":"Area 13", "region":"13"},
+    {"name":"Area 14", "region":"14"},
+    {"name":"Area 15", "region":"15"},
+    {"name":"Area 16", "region":"16"},
+    {"name":"Area 17", "region":"17"},
+    {"name":"Area 18", "region":"18"},
+    {"name":"Area 19", "region":"26"},
+    {"name":"Area 20", "region":"19"},
+    {"name":"Area 21", "region":"20"},
+    {"name":"Area 22", "region":"21"},
+    {"name":"Area 23", "region":"22"},
+    {"name":"Area 24", "region":"23"},
+    {"name":"Kilter",  "region":"25"},
 ]
 
-# Ticks per area and new boulders from DB
 NEW_DAYS = 7   # boulders set within this many days are flagged as new
 
+# ---------------------------------------------------------------------------
+# Read SVG and extract wall-center coordinates
+# ---------------------------------------------------------------------------
+with open(SVG_IN, encoding="utf-8") as f:
+    svg = f.read()
+
+# Parse every map-wall-center path to get the true SVG label position.
+# These are tiny triangles whose first coordinate is the center of the wall.
+svg_centers = {}  # region_id (str) -> (cx, cy)
+for m in re.finditer(r'id="map-region-(\d+)"', svg):
+    rid = m.group(1)
+    chunk = svg[m.start():m.start() + 600]
+    c = re.search(r'map-wall-center" d="m([\d.]+)[\s,]([\d.]+)', chunk)
+    if c:
+        svg_centers[rid] = (float(c.group(1)), float(c.group(2)))
+
+W, H = 945.0, 2232.0
+
+# ---------------------------------------------------------------------------
+# Query DB: ticks, current boulders, new boulders
+# ---------------------------------------------------------------------------
 conn = sqlite3.connect("P:/Backups/Toplogger/toplogger.db")
+
 ticks_per_wall = {}
-for row in conn.execute("SELECT c.wall, COUNT(*) FROM ticks t JOIN climbs c ON t.climb_id=c.id GROUP BY c.wall"):
+for row in conn.execute(
+    "SELECT c.wall, COUNT(*) FROM ticks t JOIN climbs c ON t.climb_id=c.id GROUP BY c.wall"
+):
     if row[0]:
         ticks_per_wall[row[0]] = row[1]
 
-# New boulders: currently active, set within NEW_DAYS days
+# All currently active boulders: (wall, grade_font, hold_color_hex)
+current_boulders = {}   # wall -> list of (grade_font, hex_color)
+for row in conn.execute("""
+    SELECT wall, grade_font, hold_color_hex
+    FROM climbs
+    WHERE climb_type='boulder'
+      AND (out_at IS NULL OR date(out_at) > date('now'))
+    ORDER BY wall, grade
+"""):
+    wall, grade, color = row
+    if wall:
+        current_boulders.setdefault(wall, []).append((grade or "?", color or "#888888"))
+
+# New boulders: currently active AND set within NEW_DAYS days
 new_per_wall = {}  # wall -> list of grade_font strings
 for row in conn.execute(f"""
     SELECT wall, grade_font
@@ -67,97 +106,149 @@ conn.close()
 
 max_ticks = max(ticks_per_wall.values()) if ticks_per_wall else 1
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def heat_colour(n, max_n):
-    """Orange heat colour from white (0) to deep orange (max)."""
+    """White (0 ticks) to deep orange (max ticks)."""
     t = n / max_n
-    r = int(255)
-    g = int(255 - t * 160)
-    b = int(255 - t * 230)
-    return f"#{r:02x}{g:02x}{b:02x}"
+    return f"#{255:02x}{int(255 - t*160):02x}{int(255 - t*230):02x}"
 
-# Read SVG
-with open(SVG_IN, encoding="utf-8") as f:
-    svg = f.read()
-
-# Determine SVG coordinate space from the background path
-# Background: m0 0h945v1416.0171... => width=945, total height ~2232
-W, H = 945.0, 2232.0
-
+# ---------------------------------------------------------------------------
 # 1. Colour each map-region by tick count
+# ---------------------------------------------------------------------------
 for wall in walls:
     region_id = f"map-region-{wall['region']}"
     n = ticks_per_wall.get(wall["name"], 0)
     colour = heat_colour(n, max_ticks)
-    # Replace fill on the element with this id
-    # Pattern: id="map-region-X" ... fill="..."  OR add fill style
     svg = re.sub(
         rf'(id="{re.escape(region_id)}")',
         rf'\1 style="fill:{colour};fill-opacity:0.75;"',
         svg
     )
 
-# 2. Build label overlay — insert before closing </svg>
+# ---------------------------------------------------------------------------
+# 2. Build label + boulder-dot overlay
+# ---------------------------------------------------------------------------
+DOT_R    = 9    # radius of each boulder dot
+DOT_COLS = 5    # max dots per row
+DOT_GAP  = DOT_R * 2 + 3
+
 labels = []
+
 for wall in walls:
-    x = wall["lx"] * W
-    y = wall["ly"] * H
+    rid = wall["region"]
     name = wall["name"]
+
+    # Use SVG center if available, else fall back to fraction
+    if rid in svg_centers:
+        x, y = svg_centers[rid]
+    else:
+        x = wall.get("lx", 0.5) * W
+        y = wall.get("ly", 0.5) * H
+
+    short = name.replace("Area ", "")
     n = ticks_per_wall.get(name, 0)
-    short = name.replace("Area ", "")  # "Area 7" → "7", "Kilter" stays
     tick_str = f"({n})" if n else ""
+
+    # Area number label
     labels.append(
         f'<text x="{x:.1f}" y="{y:.1f}" '
         f'text-anchor="middle" font-family="sans-serif" '
         f'font-size="22" font-weight="bold" fill="#222">'
         f'{short}</text>'
     )
+
+    cursor_y = y + 20  # tracks next available y below the number
+
+    # Tick count
     if tick_str:
+        cursor_y += 16
         labels.append(
-            f'<text x="{x:.1f}" y="{y+24:.1f}" '
+            f'<text x="{x:.1f}" y="{cursor_y:.1f}" '
             f'text-anchor="middle" font-family="sans-serif" '
             f'font-size="16" fill="#555">'
             f'{tick_str}</text>'
         )
 
-    # NEW badge: red pill + grade list
+    # NEW badge
     new_grades = new_per_wall.get(name, [])
     if new_grades:
-        badge_y = y + (48 if tick_str else 24)
+        cursor_y += 20
         grade_txt = " ".join(new_grades)
         pill_w = max(60, len(grade_txt) * 8 + 16)
         labels.append(
-            f'<rect x="{x - pill_w/2:.1f}" y="{badge_y - 14:.1f}" '
+            f'<rect x="{x - pill_w/2:.1f}" y="{cursor_y - 13:.1f}" '
             f'width="{pill_w:.0f}" height="16" rx="8" fill="#D62728" fill-opacity="0.88"/>'
         )
         labels.append(
-            f'<text x="{x:.1f}" y="{badge_y:.1f}" '
+            f'<text x="{x:.1f}" y="{cursor_y:.1f}" '
             f'text-anchor="middle" font-family="sans-serif" '
             f'font-size="11" font-weight="bold" fill="white">'
             f'NEW {grade_txt}</text>'
         )
 
-# Add a legend
-legend = [
-    f'<rect x="20" y="20" width="220" height="115" rx="6" fill="white" fill-opacity="0.85" stroke="#ccc"/>',
-    f'<text x="30" y="42" font-family="sans-serif" font-size="16" font-weight="bold" fill="#333">Ticks per area</text>',
-]
-for i, (label, col) in enumerate([("0 ticks", heat_colour(0, max_ticks)),
-                                    (f"{max_ticks//2}", heat_colour(max_ticks//2, max_ticks)),
-                                    (f"{max_ticks} ticks", heat_colour(max_ticks, max_ticks))]):
-    lx, ly = 30 + i*65, 55
-    legend.append(f'<rect x="{lx}" y="{ly}" width="55" height="18" rx="3" fill="{col}" stroke="#aaa"/>')
-    legend.append(f'<text x="{lx+27}" y="{ly+30}" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#333">{label}</text>')
+    # Boulder dots — one coloured circle per active boulder
+    boulders = current_boulders.get(name, [])
+    if boulders:
+        cursor_y += DOT_R + 6
+        rows = [boulders[i:i+DOT_COLS] for i in range(0, len(boulders), DOT_COLS)]
+        for row_boulders in rows:
+            row_w = len(row_boulders) * DOT_GAP - 3
+            start_x = x - row_w / 2 + DOT_R
+            for j, (grade, hex_col) in enumerate(row_boulders):
+                cx = start_x + j * DOT_GAP
+                # White outline so dots are visible against dark regions
+                labels.append(
+                    f'<circle cx="{cx:.1f}" cy="{cursor_y:.1f}" r="{DOT_R}" '
+                    f'fill="{hex_col}" stroke="white" stroke-width="1.5"/>'
+                )
+                labels.append(
+                    f'<text x="{cx:.1f}" y="{cursor_y + 4:.1f}" '
+                    f'text-anchor="middle" font-family="sans-serif" '
+                    f'font-size="8" font-weight="bold" fill="#222">'
+                    f'{grade}</text>'
+                )
+            cursor_y += DOT_GAP
 
-# NEW badge legend entry
+# ---------------------------------------------------------------------------
+# 3. Legend
+# ---------------------------------------------------------------------------
 total_new = sum(len(v) for v in new_per_wall.values())
-legend.append(f'<rect x="30" y="98" width="80" height="14" rx="7" fill="#D62728" fill-opacity="0.88"/>')
-legend.append(f'<text x="70" y="109" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="bold" fill="white">NEW</text>')
-legend.append(f'<text x="120" y="109" font-family="sans-serif" font-size="12" fill="#333">set in last {NEW_DAYS}d ({total_new})</text>')
+total_active = sum(len(v) for v in current_boulders.values())
 
+legend = [
+    f'<rect x="20" y="20" width="230" height="155" rx="6" fill="white" fill-opacity="0.88" stroke="#ccc"/>',
+    f'<text x="30" y="42" font-family="sans-serif" font-size="15" font-weight="bold" fill="#333">Ticks per area</text>',
+]
+for i, (label, col) in enumerate([
+    ("0",           heat_colour(0, max_ticks)),
+    (f"{max_ticks//2}", heat_colour(max_ticks//2, max_ticks)),
+    (f"{max_ticks}", heat_colour(max_ticks, max_ticks)),
+]):
+    lx2, ly2 = 30 + i * 65, 52
+    legend.append(f'<rect x="{lx2}" y="{ly2}" width="55" height="16" rx="3" fill="{col}" stroke="#aaa"/>')
+    legend.append(f'<text x="{lx2+27}" y="{ly2+28}" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#555">{label} ticks</text>')
+
+legend.append(f'<line x1="30" y1="100" x2="220" y2="100" stroke="#ddd"/>')
+
+# NEW badge legend
+legend.append(f'<rect x="30" y="108" width="70" height="14" rx="7" fill="#D62728" fill-opacity="0.88"/>')
+legend.append(f'<text x="65" y="119" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="bold" fill="white">NEW</text>')
+legend.append(f'<text x="108" y="119" font-family="sans-serif" font-size="11" fill="#333">set last {NEW_DAYS}d ({total_new})</text>')
+
+# Boulder dots legend
+legend.append(f'<circle cx="40" cy="140" r="{DOT_R}" fill="#FFF100" stroke="white" stroke-width="1.5"/>')
+legend.append(f'<circle cx="60" cy="140" r="{DOT_R}" fill="#00BFFF" stroke="white" stroke-width="1.5"/>')
+legend.append(f'<circle cx="80" cy="140" r="{DOT_R}" fill="#50C878" stroke="white" stroke-width="1.5"/>')
+legend.append(f'<text x="96" y="144" font-family="sans-serif" font-size="11" fill="#333">active boulders ({total_active})</text>')
+
+# ---------------------------------------------------------------------------
+# 4. Write output
+# ---------------------------------------------------------------------------
 overlay = "\n".join(labels + legend)
 svg = svg.replace("</svg>", f"<g id='labels'>\n{overlay}\n</g>\n</svg>")
 
-# Fix SVG to have explicit viewBox so it renders at the right size
 svg = svg.replace(
     '<svg xmlns="http://www.w3.org/2000/svg"',
     f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {int(W)} {int(H)}"'
