@@ -111,6 +111,63 @@ query {
 
 The `walls` list at the top of `annotate_map.py` was generated from this query for Monk Rotterdam (gym id 567). To use a different gym, replace the list with your gym's data and update `SVG_IN`/`SVG_OUT`.
 
+### New boulders
+
+The map highlights boulders set in the **last 7 days** with a red NEW badge showing the grades (e.g. `NEW 6a+ 6b`). The legend counts how many new boulders are across the whole gym.
+
+This works because TopLogger stores the date each boulder was set (`in_at`) and its planned removal date (`out_at`). After your weekly sync, the map automatically reflects whatever was set or replaced since the previous run.
+
+To change the new-boulder window, edit `NEW_DAYS` at the top of the script:
+
+```python
+NEW_DAYS = 7   # default: flag boulders set in the last week
+```
+
+You can also query new boulders directly from the database:
+
+```python
+import sqlite3
+conn = sqlite3.connect("P:/Backups/Toplogger/toplogger.db")
+rows = conn.execute("""
+    SELECT wall, grade_font, hold_color, date(in_at) as set_date
+    FROM climbs
+    WHERE climb_type = 'boulder'
+      AND date(in_at) >= date('now', '-7 days')
+      AND (out_at IS NULL OR date(out_at) > date('now'))
+    ORDER BY in_at DESC
+""").fetchall()
+for r in rows:
+    print(r)
+conn.close()
+```
+
+Or in R:
+
+```r
+library(DBI); library(RSQLite); library(dplyr)
+con <- dbConnect(SQLite(), "P:/Backups/Toplogger/toplogger.db")
+new_boulders <- tbl(con, "climbs") |>
+  filter(climb_type == "boulder",
+         in_at >= as.character(Sys.Date() - 7),
+         is.na(out_at) | out_at > as.character(Sys.Date())) |>
+  select(wall, grade_font, hold_color, in_at) |>
+  arrange(desc(in_at)) |>
+  collect()
+dbDisconnect(con)
+```
+
+Because `out_at` is also stored, you can equally query **which boulders were recently removed** — useful for understanding how quickly a gym rotates its routes:
+
+```python
+rows = conn.execute("""
+    SELECT wall, grade_font, hold_color, date(out_at) as removed_date
+    FROM climbs
+    WHERE climb_type = 'boulder'
+      AND date(out_at) >= date('now', '-30 days')
+    ORDER BY out_at DESC
+""").fetchall()
+```
+
 ### Running it
 
 ```bash
@@ -118,7 +175,7 @@ pip install requests   # already installed if you ran sync_toplogger.py
 python annotate_map.py
 ```
 
-The script reads tick counts directly from the local SQLite database, so `sync_toplogger.py` must have been run at least once first.
+The script reads tick counts and set dates directly from the local SQLite database, so `sync_toplogger.py` must have been run at least once first.
 
 ---
 

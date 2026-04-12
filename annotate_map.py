@@ -40,12 +40,29 @@ walls = [
     {"name":"Kilter",  "region":"25", "lx":0.234838,"ly":0.009239},
 ]
 
-# Ticks per area from DB
+# Ticks per area and new boulders from DB
+NEW_DAYS = 7   # boulders set within this many days are flagged as new
+
 conn = sqlite3.connect("P:/Backups/Toplogger/toplogger.db")
 ticks_per_wall = {}
 for row in conn.execute("SELECT c.wall, COUNT(*) FROM ticks t JOIN climbs c ON t.climb_id=c.id GROUP BY c.wall"):
     if row[0]:
         ticks_per_wall[row[0]] = row[1]
+
+# New boulders: currently active, set within NEW_DAYS days
+new_per_wall = {}  # wall -> list of grade_font strings
+for row in conn.execute(f"""
+    SELECT wall, grade_font
+    FROM climbs
+    WHERE climb_type='boulder'
+      AND date(in_at) >= date('now', '-{NEW_DAYS} days')
+      AND (out_at IS NULL OR date(out_at) > date('now'))
+    ORDER BY wall, grade
+"""):
+    wall, grade = row
+    if wall:
+        new_per_wall.setdefault(wall, []).append(grade or "?")
+
 conn.close()
 
 max_ticks = max(ticks_per_wall.values()) if ticks_per_wall else 1
@@ -102,10 +119,27 @@ for wall in walls:
             f'{tick_str}</text>'
         )
 
+    # NEW badge: red pill + grade list
+    new_grades = new_per_wall.get(name, [])
+    if new_grades:
+        badge_y = y + (48 if tick_str else 24)
+        grade_txt = " ".join(new_grades)
+        pill_w = max(60, len(grade_txt) * 8 + 16)
+        labels.append(
+            f'<rect x="{x - pill_w/2:.1f}" y="{badge_y - 14:.1f}" '
+            f'width="{pill_w:.0f}" height="16" rx="8" fill="#D62728" fill-opacity="0.88"/>'
+        )
+        labels.append(
+            f'<text x="{x:.1f}" y="{badge_y:.1f}" '
+            f'text-anchor="middle" font-family="sans-serif" '
+            f'font-size="11" font-weight="bold" fill="white">'
+            f'NEW {grade_txt}</text>'
+        )
+
 # Add a legend
 legend = [
-    f'<rect x="20" y="20" width="200" height="90" rx="6" fill="white" fill-opacity="0.85" stroke="#ccc"/>',
-    f'<text x="30" y="42" font-family="sans-serif" font-size="16" font-weight="bold" fill="#333">Ticks per area (recent)</text>',
+    f'<rect x="20" y="20" width="220" height="115" rx="6" fill="white" fill-opacity="0.85" stroke="#ccc"/>',
+    f'<text x="30" y="42" font-family="sans-serif" font-size="16" font-weight="bold" fill="#333">Ticks per area</text>',
 ]
 for i, (label, col) in enumerate([("0 ticks", heat_colour(0, max_ticks)),
                                     (f"{max_ticks//2}", heat_colour(max_ticks//2, max_ticks)),
@@ -113,6 +147,12 @@ for i, (label, col) in enumerate([("0 ticks", heat_colour(0, max_ticks)),
     lx, ly = 30 + i*65, 55
     legend.append(f'<rect x="{lx}" y="{ly}" width="55" height="18" rx="3" fill="{col}" stroke="#aaa"/>')
     legend.append(f'<text x="{lx+27}" y="{ly+30}" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#333">{label}</text>')
+
+# NEW badge legend entry
+total_new = sum(len(v) for v in new_per_wall.values())
+legend.append(f'<rect x="30" y="98" width="80" height="14" rx="7" fill="#D62728" fill-opacity="0.88"/>')
+legend.append(f'<text x="70" y="109" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="bold" fill="white">NEW</text>')
+legend.append(f'<text x="120" y="109" font-family="sans-serif" font-size="12" fill="#333">set in last {NEW_DAYS}d ({total_new})</text>')
 
 overlay = "\n".join(labels + legend)
 svg = svg.replace("</svg>", f"<g id='labels'>\n{overlay}\n</g>\n</svg>")
