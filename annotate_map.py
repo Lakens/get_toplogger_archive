@@ -9,8 +9,9 @@ Saves to P:/Backups/Toplogger/monk_rotterdam_annotated.svg
 
 import re, sqlite3
 
-SVG_IN  = "P:/Backups/Toplogger/monk_rotterdam_floorplan.svg"
-SVG_OUT = "P:/Backups/Toplogger/monk_rotterdam_annotated.svg"
+SVG_IN      = "P:/Backups/Toplogger/monk_rotterdam_floorplan.svg"
+SVG_OUT     = "P:/Backups/Toplogger/monk_rotterdam_annotated.svg"
+MONK_GYM_ID = "wbp04jl1359l5mf6bi1yz"
 
 # Wall data: region ID maps to area name.
 # Label positions come from the SVG's map-wall-center paths (extracted once;
@@ -77,30 +78,33 @@ conn = sqlite3.connect("P:/Backups/Toplogger/toplogger.db")
 
 ticks_per_wall = {}
 for row in conn.execute(
-    "SELECT c.wall, COUNT(*) FROM ticks t JOIN climbs c ON t.climb_id=c.id GROUP BY c.wall"
+    "SELECT c.wall, COUNT(*) FROM ticks t JOIN climbs c ON t.climb_id=c.id WHERE c.gym_id=? GROUP BY c.wall",
+    (MONK_GYM_ID,)
 ):
     if row[0]:
         ticks_per_wall[row[0]] = row[1]
 
-# All currently active boulders: (wall, grade_font, hold_color_hex)
-current_boulders = {}   # wall -> list of (grade_font, hex_color)
+# All currently active boulders: (wall, grade_font, hold_color_hex, position_x, position_y)
+current_boulders = {}   # wall -> list of (grade_font, hex_color, pos_x, pos_y)
 for row in conn.execute("""
-    SELECT wall, grade_font, hold_color_hex
+    SELECT wall, grade_font, hold_color_hex, position_x, position_y
     FROM climbs
-    WHERE climb_type='boulder'
+    WHERE gym_id=? AND climb_type='boulder'
       AND (out_at IS NULL OR date(out_at) > date('now'))
     ORDER BY wall, grade
-"""):
-    wall, grade, color = row
+""", (MONK_GYM_ID,)):
+    wall, grade, color, px, py = row
     if wall:
-        current_boulders.setdefault(wall, []).append((grade or "?", color or "#888888"))
+        current_boulders.setdefault(wall, []).append(
+            (grade or "?", color or "#888888", px, py)
+        )
 
 # New boulders: currently active AND set within NEW_DAYS days
 new_per_wall = {}  # wall -> list of grade_font strings
 for row in conn.execute(f"""
     SELECT wall, grade_font
     FROM climbs
-    WHERE climb_type='boulder'
+    WHERE gym_id='{MONK_GYM_ID}' AND climb_type='boulder'
       AND date(in_at) >= date('now', '-{NEW_DAYS} days')
       AND (out_at IS NULL OR date(out_at) > date('now'))
     ORDER BY wall, grade
@@ -137,9 +141,7 @@ for wall in walls:
 # ---------------------------------------------------------------------------
 # 2. Build label + boulder-dot overlay
 # ---------------------------------------------------------------------------
-DOT_R    = 9    # radius of each boulder dot
-DOT_COLS = 5    # max dots per row
-DOT_GAP  = DOT_R * 2 + 3
+DOT_R = 9   # radius of each boulder dot
 
 labels = []
 
@@ -195,28 +197,28 @@ for wall in walls:
             f'NEW {grade_txt}</text>'
         )
 
-    # Boulder dots — one coloured circle per active boulder
+    # Boulder dots — placed at each boulder's actual position on the map
     boulders = current_boulders.get(name, [])
-    if boulders:
-        cursor_y += DOT_R + 6
-        rows = [boulders[i:i+DOT_COLS] for i in range(0, len(boulders), DOT_COLS)]
-        for row_boulders in rows:
-            row_w = len(row_boulders) * DOT_GAP - 3
-            start_x = x - row_w / 2 + DOT_R
-            for j, (grade, hex_col) in enumerate(row_boulders):
-                cx = start_x + j * DOT_GAP
-                # White outline so dots are visible against dark regions
-                labels.append(
-                    f'<circle cx="{cx:.1f}" cy="{cursor_y:.1f}" r="{DOT_R}" '
-                    f'fill="{hex_col}" stroke="white" stroke-width="1.5"/>'
-                )
-                labels.append(
-                    f'<text x="{cx:.1f}" y="{cursor_y + 4:.1f}" '
-                    f'text-anchor="middle" font-family="sans-serif" '
-                    f'font-size="8" font-weight="bold" fill="#222">'
-                    f'{grade}</text>'
-                )
-            cursor_y += DOT_GAP
+    for grade, hex_col, px, py in boulders:
+        if px is not None and py is not None:
+            # Affine transform fitted from API label fractions vs SVG wall centres:
+            #   svg_x = 1328.31 * px - 21.63 * py - 0.24
+            #   svg_y =  -16.91 * px + 2258.65 * py - 14.93
+            bx = 1328.31 * px - 21.63 * py - 0.24
+            by = -16.91 * px + 2258.65 * py - 14.93
+        else:
+            bx, by = x, cursor_y  # fallback to area centre
+
+        labels.append(
+            f'<circle cx="{bx:.1f}" cy="{by:.1f}" r="{DOT_R}" '
+            f'fill="{hex_col}" stroke="white" stroke-width="1.5"/>'
+        )
+        labels.append(
+            f'<text x="{bx:.1f}" y="{by + 4:.1f}" '
+            f'text-anchor="middle" font-family="sans-serif" '
+            f'font-size="8" font-weight="bold" fill="#222">'
+            f'{grade}</text>'
+        )
 
 # ---------------------------------------------------------------------------
 # 3. Legend

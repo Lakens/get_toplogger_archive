@@ -239,6 +239,8 @@ def init_db(conn):
         ("climbs", "rating_avg",           "REAL"),
         ("climbs", "grade_vote_stats",     "TEXT"),
         ("climbs", "rating_vote_stats",    "TEXT"),
+        ("climbs", "position_x",           "REAL"),
+        ("climbs", "position_y",           "REAL"),
     ]
     for table, col, col_type in new_cols:
         try:
@@ -358,6 +360,7 @@ query gymClimbs($gymId: ID!) {
       holdColor { nameLoc color }
       wall { nameLoc }
       inAt outAt outPlannedAt
+      positionX positionY
     }
   }
 }
@@ -373,12 +376,14 @@ def sync_gym_climbs(conn, token, gyms):
         for climb in climbs:
             conn.execute("""
                 INSERT INTO climbs(id, gym_id, name, grade, grade_font, climb_type,
-                                   hold_color, hold_color_hex, wall, in_at, out_at, out_planned_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                                   hold_color, hold_color_hex, wall, in_at, out_at, out_planned_at,
+                                   position_x, position_y)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name, grade=excluded.grade, grade_font=excluded.grade_font,
                     hold_color=excluded.hold_color, hold_color_hex=excluded.hold_color_hex,
-                    wall=excluded.wall, out_at=excluded.out_at, out_planned_at=excluded.out_planned_at
+                    wall=excluded.wall, out_at=excluded.out_at, out_planned_at=excluded.out_planned_at,
+                    position_x=excluded.position_x, position_y=excluded.position_y
             """, (
                 climb["id"], gym_id,
                 climb.get("name"),
@@ -388,6 +393,7 @@ def sync_gym_climbs(conn, token, gyms):
                 climb.get("holdColor", {}).get("color") if climb.get("holdColor") else None,
                 climb.get("wall", {}).get("nameLoc") if climb.get("wall") else None,
                 climb.get("inAt"), climb.get("outAt"), climb.get("outPlannedAt"),
+                climb.get("positionX"), climb.get("positionY"),
             ))
         total += len(climbs)
         log.info(f"  {gym['name']}: {len(climbs)} boulders")
@@ -513,11 +519,11 @@ def sync_climb_stats(conn, token):
           AND c.grade_vote_stats IS NULL
     """).fetchall()
 
-    log.info(f"  {len(rows)} ticked climbs need stats")
-
     if not rows:
-        log.info("  No ticked climbs found")
+        log.info("  All ticked climbs already have stats")
         return
+
+    log.info(f"  {len(rows)} ticked climbs need stats")
 
     # Pause to let prior sync requests clear the server rate-limit window
     time.sleep(10)
